@@ -58,18 +58,34 @@ export async function runMutoolBenchmark(count: number, id: string): Promise<Ben
 
   const stampingTimeMs = performance.now() - stampStart;
 
-  // Stitch via mutool merge
+  // Stitch via mutool merge. The bundled binary relies on its local lib/ directory,
+  // so we pass the library path explicitly to keep it stable in CI and deploy hosts.
   const stitchStart = performance.now();
-  const mutoolBin = join(__dirname, "..", "bin", "mutool");
+  const mutoolBin = join(__dirname, "..", "bin", "mutool.bin");
+  const libDir = join(__dirname, "..", "bin", "lib");
   const outPdfPath = join(workDir, "final.pdf");
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(mutoolBin, ["merge", "-o", outPdfPath, ...chunkPaths], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        LD_LIBRARY_PATH: [libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+      },
     });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(new Error(`mutool startup failed: ${error.message}`));
+    });
+
     child.on("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`mutool merge failed with exit code ${code}`));
+      else reject(new Error(`mutool merge failed with exit code ${code}${stderr ? `: ${stderr.trim()}` : ""}`));
     });
   });
 
