@@ -10,6 +10,40 @@ import type { BenchmarkMetrics } from "./worker.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const LIB_DIR = join(__dirname, "..", "bin", "lib");
+const MUTOOL_BIN = join(__dirname, "..", "bin", "mutool.bin");
+
+export async function probeMutoolBinary(): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const child = spawn(MUTOOL_BIN, ["-h"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        LD_LIBRARY_PATH: [LIB_DIR, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+      },
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", () => {
+      resolve(false);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(true);
+        return;
+      }
+
+      const failedBecauseOfMissingNativeLib = /libjpeg\.so\.|cannot open shared object file|error while loading shared libraries/i.test(stderr);
+      resolve(!failedBecauseOfMissingNativeLib);
+    });
+  });
+}
+
 export async function runMutoolBenchmark(count: number, id: string): Promise<BenchmarkMetrics> {
   const startTime = performance.now();
   const workDir = join(__dirname, "..", "scratch", `mutool-${count}-${Date.now()}`);
@@ -61,16 +95,14 @@ export async function runMutoolBenchmark(count: number, id: string): Promise<Ben
   // Stitch via mutool merge. The bundled binary relies on its local lib/ directory,
   // so we pass the library path explicitly to keep it stable in CI and deploy hosts.
   const stitchStart = performance.now();
-  const mutoolBin = join(__dirname, "..", "bin", "mutool.bin");
-  const libDir = join(__dirname, "..", "bin", "lib");
   const outPdfPath = join(workDir, "final.pdf");
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(mutoolBin, ["merge", "-o", outPdfPath, ...chunkPaths], {
+    const child = spawn(MUTOOL_BIN, ["merge", "-o", outPdfPath, ...chunkPaths], {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        LD_LIBRARY_PATH: [libDir, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+        LD_LIBRARY_PATH: [LIB_DIR, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
       },
     });
 

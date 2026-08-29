@@ -3,7 +3,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runTypstBenchmark } from "./typst-bench.js";
-import { runMutoolBenchmark } from "./mutool-bench.js";
+import { probeMutoolBinary, runMutoolBenchmark } from "./mutool-bench.js";
 import type { BenchmarkMetrics } from "./worker.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -171,19 +171,26 @@ async function runBenchmarkSuite() {
   const mutoolResults: BenchmarkMetrics[] = [];
   const mutoolBinPath = join(__dirname, "..", "bin", "mutool");
   if (existsSync(mutoolBinPath)) {
-    console.info("\n============================================================");
-    console.info(" 🏎 4. RUNNING MUPDF NATIVE ENGINE (mutool merge)");
-    console.info("============================================================");
+    const mutoolSupported = await probeMutoolBinary();
+    if (!mutoolSupported) {
+      console.info("\n============================================================");
+      console.info(" 🏎 4. SKIPPING MUPDF NATIVE ENGINE: required shared libraries are unavailable in this runtime");
+      console.info("============================================================");
+    } else {
+      console.info("\n============================================================");
+      console.info(" 🏎 4. RUNNING MUPDF NATIVE ENGINE (mutool merge)");
+      console.info("============================================================");
 
-    for (const count of fullCounts) {
-      const id = `mutool-${count}`;
-      console.info(`▶ Starting [mutool]: ${count} covers...`);
-      try {
-        const metrics = await runMutoolBenchmark(count, id);
-        mutoolResults.push(metrics);
-        console.info(`  ✔ ${count} covers: Total ${formatTime(metrics.totalTimeMs)} | Throughput ${metrics.throughputCoversPerSec} c/s`);
-      } catch (err) {
-        console.warn(`  ⚠ mutool ${count} covers failed:`, err);
+      for (const count of fullCounts) {
+        const id = `mutool-${count}`;
+        console.info(`▶ Starting [mutool]: ${count} covers...`);
+        try {
+          const metrics = await runMutoolBenchmark(count, id);
+          mutoolResults.push(metrics);
+          console.info(`  ✔ ${count} covers: Total ${formatTime(metrics.totalTimeMs)} | Throughput ${metrics.throughputCoversPerSec} c/s`);
+        } catch (err) {
+          console.warn(`  ⚠ mutool ${count} covers failed:`, err);
+        }
       }
     }
   }
