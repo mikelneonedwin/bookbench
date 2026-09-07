@@ -169,6 +169,10 @@ fn main() {
         out_doc.objects.insert(id, obj.clone());
     }
 
+    out_doc.max_id = template_doc
+        .max_id
+        .max(out_doc.objects.keys().map(|(id, _)| *id).max().unwrap_or(0));
+
     let pages_id = out_doc.new_object_id();
     let bg_form_id = out_doc.add_object(form_stream);
 
