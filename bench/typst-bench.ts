@@ -22,6 +22,8 @@ export async function runTypstBenchmark(count: number, id: string): Promise<Benc
     enrollments.map((e) => QRCode.toString(e.qrUrl, { type: "svg", margin: 1 }))
   );
 
+  const projectRoot = join(__dirname, "..");
+
   let typstMarkup = `
 #set page(paper: "a4", margin: 0pt)
 `;
@@ -31,8 +33,8 @@ export async function runTypstBenchmark(count: number, id: string): Promise<Benc
     const encodedSvg = qrSvgs[i].replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "");
     typstMarkup += `
 #page[
-  #place(top + left, dx: 0pt, dy: 0pt, rect(width: 100%, height: 100%, fill: none, stroke: 1pt + rgb("e2e8f0")))
-  #place(top + right, dx: -20pt, dy: 20pt, text(weight: "bold")[${e.serialNumber}])
+  #place(top + left, dx: 0pt, dy: 0pt, image("/assets/cover-template.svg", width: 100%, height: 100%))
+  #place(top + right, dx: -20pt, dy: 20pt, text(weight: "bold", size: 10pt)[${e.serialNumber}])
   #place(bottom + left, dx: 50pt, dy: -60pt, image.decode("${encodedSvg}", format: "svg", width: 100pt, height: 100pt))
   ${e.regNumber ? `#place(bottom + left, dx: 50pt, dy: -166pt, text(size: 9pt)[${e.regNumber}])` : ""}
 ]
@@ -49,7 +51,7 @@ export async function runTypstBenchmark(count: number, id: string): Promise<Benc
   const typstBin = join(__dirname, "..", "bin", "typst");
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(typstBin, ["compile", typPath, outPdfPath], {
+    const child = spawn(typstBin, ["compile", "--root", projectRoot, typPath, outPdfPath], {
       cwd: workDir,
       stdio: ["ignore", "pipe", "pipe"],
     });

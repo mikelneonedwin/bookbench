@@ -3,6 +3,7 @@ use lopdf::{dictionary, Document, Object, Stream};
 use qrcode::{Color, QrCode};
 use serde::Serialize;
 use std::env;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Serialize)]
@@ -51,6 +52,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut count = 50;
     let mut scenario_id = "rust-lopdf".to_string();
+    let mut template_path = PathBuf::from("assets/cover-template.pdf");
 
     let mut i = 1;
     while i < args.len() {
@@ -60,16 +62,121 @@ fn main() {
         } else if args[i] == "--id" && i + 1 < args.len() {
             scenario_id = args[i + 1].clone();
             i += 2;
+        } else if args[i] == "--template" && i + 1 < args.len() {
+            template_path = PathBuf::from(&args[i + 1]);
+            i += 2;
         } else {
             i += 1;
         }
     }
 
+    if !template_path.exists() {
+        let alt = Path::new("..").join(&template_path);
+        if alt.exists() {
+            template_path = alt;
+        }
+    }
+
     let start_all = Instant::now();
+
+    // 1. Load template PDF
+    let template_doc = match Document::load(&template_path) {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("Failed to load template PDF at {:?}: {}", template_path, e);
+            let metrics = BenchmarkMetrics {
+                scenario_id,
+                engine: "lopdf (Rust native)".to_string(),
+                covers_count: count,
+                stamping_time_ms: 0.0,
+                stitching_time_ms: 0.0,
+                total_time_ms: 0.0,
+                throughput_covers_per_sec: 0.0,
+                output_size_bytes: 0,
+                peak_rss_mb: 0.0,
+                success: false,
+                error: Some(format!("Failed to load template: {}", e)),
+            };
+            println!("__BENCH_RESULT__{}", serde_json::to_string(&metrics).unwrap());
+            return;
+        }
+    };
+
     let stamp_start = Instant::now();
 
+    // Find first page of template
+    let template_pages = template_doc.get_pages();
+    let (_, template_first_page_id) = template_pages
+        .iter()
+        .next()
+        .expect("Template PDF must have at least one page");
+
+    let template_page_dict = template_doc
+        .get_dictionary(*template_first_page_id)
+        .expect("Template page must be a dictionary");
+
+    // Extract MediaBox, default to A4 if missing
+    let media_box: Vec<Object> = match template_page_dict.get(b"MediaBox") {
+        Ok(Object::Array(arr)) => arr.clone(),
+        _ => vec![0.into(), 0.into(), 595.28.into(), 841.89.into()],
+    };
+
+    let page_width = match media_box.get(2) {
+        Some(Object::Real(val)) => *val as f64,
+        Some(Object::Integer(val)) => *val as f64,
+        _ => 595.28,
+    };
+    let page_height = match media_box.get(3) {
+        Some(Object::Real(val)) => *val as f64,
+        Some(Object::Integer(val)) => *val as f64,
+        _ => 841.89,
+    };
+
+    // Extract template resources dictionary (fonts, etc.)
+    let template_resources = match template_page_dict.get(b"Resources") {
+        Ok(Object::Dictionary(dict)) => Object::Dictionary(dict.clone()),
+        Ok(Object::Reference(id)) => Object::Reference(*id),
+        _ => Object::Dictionary(dictionary! {}),
+    };
+
+    let form_content = template_doc.get_page_content(*template_first_page_id).unwrap_or_default();
+    let bbox = vec![0.0f32, 0.0f32, page_width as f32, page_height as f32];
+    let matrix = vec![1.0f32, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+    let form_dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Form",
+        "BBox" => Object::Array(bbox.into_iter().map(Object::Real).collect()),
+        "Matrix" => Object::Array(matrix.into_iter().map(Object::Real).collect()),
+        "Resources" => template_resources,
+    };
+
+    let mut form_stream = Stream::new(form_dict, form_content);
+    let _ = form_stream.compress();
+
+    // Copy template doc objects into out_doc so font/stream references remain valid
     let mut out_doc = Document::with_version("1.7");
+
+    // Copy non-Catalog, non-Pages objects from template to out_doc
+    for (&id, obj) in &template_doc.objects {
+        if let Ok(dict) = obj.as_dict() {
+            if let Ok(type_name) = dict.get(b"Type").and_then(Object::as_name_str) {
+                if type_name == "Catalog" || type_name == "Pages" {
+                    continue;
+                }
+            }
+        }
+        out_doc.objects.insert(id, obj.clone());
+    }
+
     let pages_id = out_doc.new_object_id();
+    let bg_form_id = out_doc.add_object(form_stream);
+
+    let f1_id = out_doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
 
     let mut out_page_ids = Vec::with_capacity(count);
 
@@ -81,8 +188,8 @@ fn main() {
 
         // Fast native QR bitmatrix generation
         let code = QrCode::new(qr_url.as_bytes()).unwrap();
-        let width = code.width();
-        let mut raw_bytes = Vec::with_capacity(width * width);
+        let qr_width = code.width();
+        let mut raw_bytes = Vec::with_capacity(qr_width * qr_width);
         for color in code.to_colors() {
             match color {
                 Color::Dark => raw_bytes.push(0u8),
@@ -90,13 +197,12 @@ fn main() {
             }
         }
 
-        // Convert raw pixels into PDF Image XObject
         let img_stream = Stream::new(
             dictionary! {
                 "Type" => "XObject",
                 "Subtype" => "Image",
-                "Width" => width as i64,
-                "Height" => width as i64,
+                "Width" => qr_width as i64,
+                "Height" => qr_width as i64,
                 "ColorSpace" => "DeviceGray",
                 "BitsPerComponent" => 8,
             },
@@ -104,9 +210,14 @@ fn main() {
         );
         let img_id = out_doc.add_object(img_stream);
 
-        // Content stream
         let qr_name = format!("QR{}", idx);
         let content_operations = vec![
+            // Draw background cover Form XObject
+            Operation::new("q", vec![]),
+            Operation::new("Do", vec![Object::Name(b"CoverBG".to_vec())]),
+            Operation::new("Q", vec![]),
+
+            // Draw QR code at (50, 60), 100x100
             Operation::new("q", vec![]),
             Operation::new(
                 "cm",
@@ -121,11 +232,15 @@ fn main() {
             ),
             Operation::new("Do", vec![Object::Name(qr_name.clone().into_bytes())]),
             Operation::new("Q", vec![]),
+
+            // Serial number - top right corner
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 10.0.into()]),
-            Operation::new("Td", vec![480.0.into(), 820.0.into()]),
+            Operation::new("Td", vec![(page_width - 55.0).into(), (page_height - 20.0).into()]),
             Operation::new("Tj", vec![Object::string_literal(serial)]),
             Operation::new("ET", vec![]),
+
+            // Reg number - above QR code (50, 166)
             Operation::new("BT", vec![]),
             Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 10.0.into()]),
             Operation::new("Td", vec![50.0.into(), 166.0.into()]),
@@ -139,17 +254,14 @@ fn main() {
         let page_dict = dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), 595.28.into(), 841.89.into()],
+            "MediaBox" => media_box.clone(),
             "Contents" => content_id,
             "Resources" => dictionary! {
                 "Font" => dictionary! {
-                    "F1" => dictionary! {
-                        "Type" => "Font",
-                        "Subtype" => "Type1",
-                        "BaseFont" => "Helvetica",
-                    },
+                    "F1" => f1_id,
                 },
                 "XObject" => dictionary! {
+                    "CoverBG" => bg_form_id,
                     qr_name => img_id,
                 },
             },
